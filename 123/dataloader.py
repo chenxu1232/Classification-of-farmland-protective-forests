@@ -1,4 +1,5 @@
-# 八通道整体
+
+# Complete Eight-Channel Data Processing Pipeline
 import os
 import cv2
 import numpy as np
@@ -23,40 +24,41 @@ class SegmentationDataset(Dataset):
         annotation_line = self.annotation_lines[index]
         name            = annotation_line.split()[0]
 
-        # 1. 读取 8 通道数据
+        # 1. Load eight-channel data
         image_path = os.path.join(self.dataset_path, "VOC2007/JPEGImages", name + ".npy")
         try:
             jpg = np.load(image_path)
         except FileNotFoundError:
-            raise FileNotFoundError(f"找不到数据文件: {image_path}")
+            raise FileNotFoundError(f"Data file not found: {image_path}")
         
-        # 此时 jpg 的范围是 0 - 5800 左右，类型 uint16
+        # The pixel values are approximately in the range of 0-5800, with uint16 data type
         jpg = jpg.astype(np.float32)
 
         # ---------------------------------------------------
-        # 【核心修复】归一化 (Normalization)
+        # Critical Fix: Normalization
         # ---------------------------------------------------
-        # 既然最大值在 5800 左右，这是典型的反射率数据 (scale=10000)
-        # 我们将其除以 10000，将其映射到 0.0 - 0.6 左右的范围，这对神经网络非常健康。
+        # Since the maximum value is approximately 5800, this is typical reflectance data (scale factor = 10000)
+        # Divide by 10000 to map the values to approximately 0.0-0.6, providing a suitable input range for neural networks
         jpg = jpg / 10000.0
         
-        # 加上 clip 防止极少数噪点超过 1.0 (虽然你的最大值才5800，但这行代码很安全)
+        # Apply clipping to prevent a small number of noisy pixels from exceeding 1.0
+        # Although the observed maximum is only about 5800, this operation provides an additional safeguard
         jpg = np.clip(jpg, 0, 1.0)
 
         # ---------------------------------------------------
-        # 2. 读取 标签数据
+        # 2. Load segmentation labels
         # ---------------------------------------------------
         png_path = os.path.join(self.dataset_path, "VOC2007/SegmentationClass", name + ".png")
         png = Image.open(png_path)
         
-        # ... (后续的数据增强、transpose 代码保持不变) ...
+        # ... (Keep the subsequent data augmentation and transpose operations unchanged) ...
         
         jpg, png = self.get_random_data(jpg, png, self.input_shape, random=self.train)
         
         jpg = np.transpose(jpg, [2, 0, 1])
         png = np.array(png)
         
-        # 如果是二分类，确保 label 没问题
+        # For binary segmentation, ensure that label values are valid
         if self.num_classes == 2:
              png[png >= self.num_classes] = 0
         else:
@@ -72,7 +74,7 @@ class SegmentationDataset(Dataset):
 
     def get_random_data(self, image, label, input_shape, jitter=.3, random=True):
         """
-        针对 8 通道数据的增强，移除了 HSV 变换
+        Data augmentation for eight-channel images, with HSV transformations removed.
         """
         if isinstance(label, Image.Image):
             label = np.array(label)
@@ -81,7 +83,7 @@ class SegmentationDataset(Dataset):
         h, w    = input_shape
 
         if not random:
-            # 验证集：简单的 Resize 和 Padding，保持长宽比
+            # Validation set: Simple resizing and padding while preserving the aspect ratio
             scale = min(w/iw, h/ih)
             nw = int(iw*scale)
             nh = int(ih*scale)
@@ -89,11 +91,12 @@ class SegmentationDataset(Dataset):
             image = cv2.resize(image, (nw, nh), interpolation=cv2.INTER_CUBIC)
             label = cv2.resize(label, (nw, nh), interpolation=cv2.INTER_NEAREST)
 
-            # 填充背景值：图像填 0 或 128 均可，这里保持一致性填 0 (假设已归一化)
-            # 如果未归一化且是uint8，可以填128。如果是float数据，建议填0。
-            # 这里为了保险，填 0。
+            # Background padding: Either 0 or 128 can be used, but 0 is chosen for consistency with normalized data
+            # For unnormalized uint8 images, a padding value of 128 may be appropriate
+            # For floating-point data, zero-padding is generally recommended
+            # Here, zero-padding is used as a precaution
             new_image = np.full((h, w, image.shape[2]), 0, dtype=np.float32)
-            new_label = np.full((h, w), 0, dtype=np.uint8) # 标签背景类通常是0
+            new_label = np.full((h, w), 0, dtype=np.uint8) # The background label is typically 0
 
             dx = (w-nw)//2
             dy = (h-nh)//2
@@ -104,10 +107,10 @@ class SegmentationDataset(Dataset):
             return new_image, new_label
 
         # ==========================================================
-        # 训练集数据增强
+        # Training Data Augmentation
         # ==========================================================
         
-        # 1. Resize and jitter (长宽比抖动 + 缩放)
+        # 1. Resize and jitter (aspect-ratio jittering and scaling)
         new_ar = iw/ih * self.rand(1-jitter,1+jitter) / self.rand(1-jitter,1+jitter)
         scale = self.rand(0.5, 2)
         if new_ar < 1:
@@ -117,40 +120,41 @@ class SegmentationDataset(Dataset):
             nw = int(scale*w)
             nh = int(nw/new_ar)
         
-        # cv2.resize 在高版本 OpenCV 支持多通道，一般无需拆分
+        # Recent versions of OpenCV generally support multichannel resizing without splitting channels
         image = cv2.resize(image, (nw, nh), interpolation=cv2.INTER_CUBIC)
         label = cv2.resize(label, (nw, nh), interpolation=cv2.INTER_NEAREST)
 
-        # 2. Flip (翻转)
+        # 2. Flip (horizontal flipping)
         flip = self.rand()<.5
         if flip: 
-            image = cv2.flip(image, 1) # 1: 水平翻转
+            image = cv2.flip(image, 1) # 1: Horizontal flip
             label = cv2.flip(label, 1)
 
-        # 3. Place on canvas (Padding/Crop)
+        # 3. Place on canvas (padding/cropping)
         dx = int(self.rand(0, w-nw))
         dy = int(self.rand(0, h-nh))
         
         new_image = np.full((h, w, image.shape[2]), 0, dtype=np.float32)
         new_label = np.full((h, w), 0, dtype=np.uint8)
         
-        # 安全赋值，处理 crop 越界情况
+        # Safe assignment to handle cases where cropping extends beyond the canvas boundaries
         if nw > w or nh > h:
-             # 如果 resize 后比目标输入大，直接 resize 到目标输入
+             # If the resized image exceeds the target dimensions, resize it directly to the target size
              image = cv2.resize(image, (w, h), interpolation=cv2.INTER_CUBIC)
              label = cv2.resize(label, (w, h), interpolation=cv2.INTER_NEAREST)
              new_image = image
              new_label = label
         else:
-            # 否则贴图
+            # Otherwise, place the resized image on the canvas
             new_image[dy:dy+nh, dx:dx+nw, :] = image
             new_label[dy:dy+nh, dx:dx+nw] = label
 
         image = new_image
         label = new_label
 
-        # 4. Blur (高斯模糊)
-        # 【修复】cv2.GaussianBlur 有时不支持 >4 通道，改为分通道处理更稳健
+        # 4. Blur (Gaussian blur)
+        # Fix: cv2.GaussianBlur may not support more than four channels in some cases
+        # Process each channel separately for improved robustness
         blur = self.rand() < 0.25
         if blur: 
             if image.shape[2] > 4:
@@ -163,29 +167,29 @@ class SegmentationDataset(Dataset):
             else:
                 image = cv2.GaussianBlur(image, (5, 5), 0)
 
-        # 5. Rotate (旋转)
+        # 5. Rotate (rotation)
         rotate = self.rand() < 0.25
         if rotate: 
             center      = (w // 2, h // 2)
             rotation    = np.random.randint(-10, 11)
-            # 获取旋转矩阵
+            # Obtain the rotation matrix
             M           = cv2.getRotationMatrix2D(center, -rotation, scale=1)
             
-            # --- 核心修改：分通道处理旋转 ---
-            # warpAffine 的 borderValue 参数不支持 >4 个数值的 tuple
+            # --- Core modification: Perform rotation separately for each channel ---
+            # The borderValue parameter of warpAffine does not support tuples containing more than four values
             if image.shape[2] > 4:
                 channels = cv2.split(image)
                 warped_channels = []
                 for ch in channels:
-                    # 单通道 warp，borderValue 填 0 (假设 float32 且已归一化)
+                    # Apply single-channel warping with borderValue=0 (assuming normalized float32 data)
                     warped_ch = cv2.warpAffine(ch, M, (w, h), flags=cv2.INTER_CUBIC, borderValue=0)
                     warped_channels.append(warped_ch)
                 image = cv2.merge(warped_channels)
             else:
-                # 4通道及以下可以直接处理
+                # Images with four or fewer channels can be processed directly
                 image = cv2.warpAffine(image, M, (w, h), flags=cv2.INTER_CUBIC, borderValue=(0,)*image.shape[2])
             
-            # 标签处理
+            # Process the segmentation labels
             label = cv2.warpAffine(label, M, (w, h), flags=cv2.INTER_NEAREST, borderValue=0)
 
         return image, label
